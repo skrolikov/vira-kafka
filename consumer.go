@@ -8,13 +8,7 @@ import (
 	log "github.com/skrolikov/vira-logger"
 )
 
-// Consumer инкапсулирует чтение сообщений из Kafka.
-type Consumer struct {
-	reader *kafka.Reader
-	logger *log.Logger
-}
-
-// ConsumerConfig содержит параметры конфигурации потребителя Kafka.
+// ConsumerConfig содержит параметры конфигурации Kafka Consumer.
 type ConsumerConfig struct {
 	Brokers  []string
 	Topic    string
@@ -22,6 +16,12 @@ type ConsumerConfig struct {
 	MinBytes int
 	MaxBytes int
 	MaxWait  time.Duration
+}
+
+// Consumer — Kafka consumer с логгированием.
+type Consumer struct {
+	reader *kafka.Reader
+	logger *log.Logger
 }
 
 // NewConsumer создаёт новый Kafka consumer.
@@ -35,23 +35,34 @@ func NewConsumer(cfg ConsumerConfig, logger *log.Logger) *Consumer {
 		MaxWait:     cfg.MaxWait,
 		StartOffset: kafka.LastOffset,
 	})
+
 	logger.Info("✅ Kafka consumer создан для topic: %s, group: %s", cfg.Topic, cfg.GroupID)
 
-	return &Consumer{reader: r, logger: logger}
+	return &Consumer{
+		reader: r,
+		logger: logger,
+	}
 }
 
 // ReadMessage читает одно сообщение из Kafka.
 func (c *Consumer) ReadMessage(ctx context.Context) (kafka.Message, error) {
 	msg, err := c.reader.ReadMessage(ctx)
 	if err != nil {
-		c.logger.Error("❌ Ошибка чтения из Kafka: %v", err)
+		kafkaMessagesReadFailed.WithLabelValues(c.reader.Config().Topic).Inc()
+		c.logger.WithContext(ctx).Error("❌ Ошибка чтения из Kafka: %v", err)
 		return kafka.Message{}, err
 	}
-	c.logger.Debug("📥 Получено сообщение: topic=%s partition=%d offset=%d", msg.Topic, msg.Partition, msg.Offset)
+
+	kafkaMessagesReceived.WithLabelValues(c.reader.Config().Topic).Inc()
+	c.logger.WithContext(ctx).Debug(
+		"📥 Получено сообщение: topic=%s partition=%d offset=%d",
+		msg.Topic, msg.Partition, msg.Offset,
+	)
+
 	return msg, nil
 }
 
-// Close закрывает reader Kafka.
+// Close закрывает Kafka reader.
 func (c *Consumer) Close() error {
 	err := c.reader.Close()
 	if err != nil {
