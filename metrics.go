@@ -1,7 +1,15 @@
+//go:build !test
+// +build !test
+
 package kafka
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+)
+
+var (
+	// DefaultMetrics содержит зарегистрированные метрики Kafka (глобально)
+	DefaultMetrics *KafkaMetrics
 )
 
 // KafkaMetrics содержит все метрики для мониторинга Kafka Producer.
@@ -31,4 +39,9 @@ func NewKafkaMetrics(reg prometheus.Registerer) *KafkaMetrics {
 
 	reg.MustRegister(m.MessagesSent, m.MessagesFailed)
 	return m
+}
+
+// RegisterAll инициализирует глобальные метрики Kafka
+func RegisterAll() {
+	DefaultMetrics = NewKafkaMetrics(prometheus.DefaultRegisterer)
 }
