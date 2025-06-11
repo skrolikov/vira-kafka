@@ -9,10 +9,10 @@ import (
 	log "github.com/skrolikov/vira-logger"
 )
 
-// MessageMiddleware позволяет модифицировать сообщение перед отправкой.
+// MessageMiddleware позволяет изменять key/value перед отправкой.
 type MessageMiddleware func(ctx context.Context, key string, value []byte) (string, []byte, error)
 
-// ProducerConfig содержит расширенные параметры конфигурации Kafka Producer.
+// ProducerConfig описывает параметры создания Kafka Producer.
 type ProducerConfig struct {
 	Brokers      []string
 	Topic        string
@@ -23,19 +23,22 @@ type ProducerConfig struct {
 	Compression  kafka.Compression
 	MaxAttempts  int
 
+	Metrics     *KafkaMetrics
 	Middlewares []MessageMiddleware
 }
 
-// Producer — Kafka producer с middleware и логгированием.
+// Producer — Kafka producer с поддержкой middleware, логгированием и метриками.
 type Producer struct {
 	writer      *kafka.Writer
 	logger      *log.Logger
 	middlewares []MessageMiddleware
+	metrics     *KafkaMetrics
+	topic       string
 }
 
-// NewProducer создаёт нового Kafka producer по конфигурации.
+// NewProducer создаёт и настраивает Kafka producer.
 func NewProducer(cfg ProducerConfig, logger *log.Logger) *Producer {
-	w := &kafka.Writer{
+	writer := &kafka.Writer{
 		Addr:         kafka.TCP(cfg.Brokers...),
 		Topic:        cfg.Topic,
 		Balancer:     &kafka.LeastBytes{},
@@ -49,17 +52,19 @@ func NewProducer(cfg ProducerConfig, logger *log.Logger) *Producer {
 	logger.Info("✅ Kafka producer создан для topic: %s", cfg.Topic)
 
 	return &Producer{
-		writer:      w,
+		writer:      writer,
 		logger:      logger,
 		middlewares: cfg.Middlewares,
+		metrics:     cfg.Metrics,
+		topic:       cfg.Topic,
 	}
 }
 
-// Send отправляет сообщение в Kafka, проходя через все middleware.
+// Send отправляет сообщение в Kafka, с применением middleware и обновлением метрик.
 func (p *Producer) Send(ctx context.Context, key string, value []byte) error {
 	var err error
-	for _, m := range p.middlewares {
-		key, value, err = m(ctx, key, value)
+	for _, mw := range p.middlewares {
+		key, value, err = mw(ctx, key, value)
 		if err != nil {
 			p.logger.WithContext(ctx).Error("❌ Middleware ошибка: %v", err)
 			return err
@@ -77,17 +82,21 @@ func (p *Producer) Send(ctx context.Context, key string, value []byte) error {
 
 	err = p.writer.WriteMessages(ctx, msg)
 	if err != nil {
-		kafkaMessagesFailed.WithLabelValues(p.writer.Topic).Inc()
+		if p.metrics != nil {
+			p.metrics.MessagesFailed.WithLabelValues(p.topic).Inc()
+		}
 		p.logger.WithContext(ctx).Error("❌ Ошибка отправки сообщения в Kafka: %v", err)
 		return err
 	}
 
-	kafkaMessagesSent.WithLabelValues(p.writer.Topic).Inc()
+	if p.metrics != nil {
+		p.metrics.MessagesSent.WithLabelValues(p.topic).Inc()
+	}
 	p.logger.WithContext(ctx).Debug("📤 Сообщение отправлено: key=%s", key)
 	return nil
 }
 
-// SendEvent сериализует и отправляет событие.
+// SendEvent сериализует структуру и отправляет как JSON.
 func (p *Producer) SendEvent(ctx context.Context, key string, event any) error {
 	data, err := json.Marshal(event)
 	if err != nil {
@@ -97,7 +106,7 @@ func (p *Producer) SendEvent(ctx context.Context, key string, event any) error {
 	return p.Send(ctx, key, data)
 }
 
-// Close закрывает Kafka writer.
+// Close закрывает соединение с Kafka.
 func (p *Producer) Close() error {
 	err := p.writer.Close()
 	if err != nil {

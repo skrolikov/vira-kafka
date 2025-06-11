@@ -16,17 +16,21 @@ type ConsumerConfig struct {
 	MinBytes int
 	MaxBytes int
 	MaxWait  time.Duration
+
+	Metrics *KafkaMetrics
 }
 
-// Consumer — Kafka consumer с логгированием.
+// Consumer — Kafka consumer с логгированием и метриками.
 type Consumer struct {
-	reader *kafka.Reader
-	logger *log.Logger
+	reader  *kafka.Reader
+	logger  *log.Logger
+	metrics *KafkaMetrics
+	topic   string
 }
 
 // NewConsumer создаёт новый Kafka consumer.
 func NewConsumer(cfg ConsumerConfig, logger *log.Logger) *Consumer {
-	r := kafka.NewReader(kafka.ReaderConfig{
+	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:     cfg.Brokers,
 		Topic:       cfg.Topic,
 		GroupID:     cfg.GroupID,
@@ -39,21 +43,27 @@ func NewConsumer(cfg ConsumerConfig, logger *log.Logger) *Consumer {
 	logger.Info("✅ Kafka consumer создан для topic: %s, group: %s", cfg.Topic, cfg.GroupID)
 
 	return &Consumer{
-		reader: r,
-		logger: logger,
+		reader:  reader,
+		logger:  logger,
+		metrics: cfg.Metrics,
+		topic:   cfg.Topic,
 	}
 }
 
-// ReadMessage читает одно сообщение из Kafka.
+// ReadMessage читает одно сообщение из Kafka, обновляет метрики и логирует.
 func (c *Consumer) ReadMessage(ctx context.Context) (kafka.Message, error) {
 	msg, err := c.reader.ReadMessage(ctx)
 	if err != nil {
-		kafkaMessagesReadFailed.WithLabelValues(c.reader.Config().Topic).Inc()
+		if c.metrics != nil {
+			c.metrics.MessagesFailed.WithLabelValues(c.topic).Inc()
+		}
 		c.logger.WithContext(ctx).Error("❌ Ошибка чтения из Kafka: %v", err)
 		return kafka.Message{}, err
 	}
 
-	kafkaMessagesReceived.WithLabelValues(c.reader.Config().Topic).Inc()
+	if c.metrics != nil {
+		c.metrics.MessagesSent.WithLabelValues(c.topic).Inc()
+	}
 	c.logger.WithContext(ctx).Debug(
 		"📥 Получено сообщение: topic=%s partition=%d offset=%d",
 		msg.Topic, msg.Partition, msg.Offset,
@@ -62,7 +72,7 @@ func (c *Consumer) ReadMessage(ctx context.Context) (kafka.Message, error) {
 	return msg, nil
 }
 
-// Close закрывает Kafka reader.
+// Close закрывает Kafka consumer.
 func (c *Consumer) Close() error {
 	err := c.reader.Close()
 	if err != nil {
