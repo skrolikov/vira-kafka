@@ -7,6 +7,8 @@ import (
 
 	"github.com/segmentio/kafka-go"
 	log "github.com/skrolikov/vira-logger"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // MessageMiddleware позволяет изменять key/value перед отправкой.
@@ -25,6 +27,9 @@ type ProducerConfig struct {
 
 	Metrics     *KafkaMetrics
 	Middlewares []MessageMiddleware
+
+	Logger *log.Logger
+	Tracer trace.Tracer
 }
 
 // Producer — Kafka producer с поддержкой middleware, логгированием и метриками.
@@ -34,10 +39,18 @@ type Producer struct {
 	middlewares []MessageMiddleware
 	metrics     *KafkaMetrics
 	topic       string
+	tracer      trace.Tracer
 }
 
 // NewProducer создаёт и настраивает Kafka producer.
-func NewProducer(cfg ProducerConfig, logger *log.Logger) *Producer {
+func NewProducer(cfg ProducerConfig) *Producer {
+	if cfg.Logger == nil {
+		cfg.Logger = log.DefaultLogger()
+	}
+	if cfg.Tracer == nil {
+		cfg.Tracer = otel.Tracer("kafka-producer")
+	}
+
 	writer := &kafka.Writer{
 		Addr:         kafka.TCP(cfg.Brokers...),
 		Topic:        cfg.Topic,
@@ -49,24 +62,29 @@ func NewProducer(cfg ProducerConfig, logger *log.Logger) *Producer {
 		MaxAttempts:  cfg.MaxAttempts,
 	}
 
-	logger.Info("✅ Kafka producer создан для topic: %s", cfg.Topic)
+	cfg.Logger.Info("✅ Kafka producer создан для topic: %s", cfg.Topic)
 
 	return &Producer{
 		writer:      writer,
-		logger:      logger,
+		logger:      cfg.Logger,
 		middlewares: cfg.Middlewares,
 		metrics:     cfg.Metrics,
 		topic:       cfg.Topic,
+		tracer:      cfg.Tracer,
 	}
 }
 
 // Send отправляет сообщение в Kafka, с применением middleware и обновлением метрик.
 func (p *Producer) Send(ctx context.Context, key string, value []byte) error {
+	ctx, span := p.tracer.Start(ctx, "kafka.Producer.Send")
+	defer span.End()
+
 	var err error
 	for _, mw := range p.middlewares {
 		key, value, err = mw(ctx, key, value)
 		if err != nil {
 			p.logger.WithContext(ctx).Error("❌ Middleware ошибка: %v", err)
+			span.RecordError(err)
 			return err
 		}
 	}
@@ -86,6 +104,7 @@ func (p *Producer) Send(ctx context.Context, key string, value []byte) error {
 			p.metrics.MessagesFailed.WithLabelValues(p.topic).Inc()
 		}
 		p.logger.WithContext(ctx).Error("❌ Ошибка отправки сообщения в Kafka: %v", err)
+		span.RecordError(err)
 		return err
 	}
 
@@ -93,6 +112,7 @@ func (p *Producer) Send(ctx context.Context, key string, value []byte) error {
 		p.metrics.MessagesSent.WithLabelValues(p.topic).Inc()
 	}
 	p.logger.WithContext(ctx).Debug("📤 Сообщение отправлено: key=%s", key)
+
 	return nil
 }
 
